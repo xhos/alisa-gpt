@@ -1,10 +1,9 @@
 # Standard library imports
 import os
-import json
 import logging
 
 # Third-party imports
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import requests
 from flask_session import Session
