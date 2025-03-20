@@ -1,0 +1,13 @@
+yourdomain.com {
+    reverse_proxy alisa-gpt:5000
+    encode gzip
+    log {
+        output file /data/access.log {
+            roll_size 10MB
+            roll_keep 5
+        }
+    }
+    tls {
+        protocols tls1.2 tls1.3
+    }
+}
