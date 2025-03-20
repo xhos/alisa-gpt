@@ -139,7 +139,7 @@ def ask_gemini(message, messages, max_retries=2):
             logger.info(f"Sending request to Gemini API with prompt: {full_prompt[:100]}...")
             
             # Create the model and generate content
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-2.0-flash')
             response = model.generate_content(full_prompt)
             
             logger.info("Gemini API response received")
