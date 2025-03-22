@@ -5,9 +5,10 @@ import logging
 # Third-party imports
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-import requests
 from flask_session import Session
-import google.generativeai as genai
+from google import genai
+from google.genai import types
+from openai import OpenAI
 
 # Configure logging
 logging.basicConfig(
@@ -25,33 +26,45 @@ app.config["SESSION_PERMANENT"] = False
 app.config["SESSION_TYPE"] = "filesystem"
 Session(app)
 
-# Global configuration - choose AI provider
-AI_PROVIDER = os.getenv('AI_PROVIDER', 'openai').lower().strip()  # Options: 'openai' or 'gemini'
-logger.info(f"AI_PROVIDER set to: {AI_PROVIDER}")
+# Global configuration - choose AI provider based on available keys
+openai_api_key = os.environ.get("OPENAI_API_KEY")
+gemini_api_key = os.environ.get("GEMINI_API_KEY")
 
-# Validate required environment variables
-required_vars = ['OPENAI_API_KEY'] if AI_PROVIDER == 'openai' else ['GEMINI_API_KEY']
-for var in required_vars:
-    if not os.getenv(var):
-        logger.error(f"Missing required environment variable: {var}")
-
-# Initialize Gemini if selected
-if AI_PROVIDER == 'gemini':
+# Default to OpenAI if both are available, otherwise use whichever is available
+if openai_api_key:
+    AI_PROVIDER = os.getenv('AI_PROVIDER', 'openai').lower().strip()
     try:
-        gemini_api_key = os.getenv('GEMINI_API_KEY')
+        openai_client = OpenAI(api_key=openai_api_key)
+        logger.info("OpenAI client initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize OpenAI client: {str(e)}")
         if gemini_api_key:
-            masked_key = f"{gemini_api_key[:4]}...{gemini_api_key[-4:]}" if len(gemini_api_key) > 8 else "***"
-            logger.info(f"Initializing Gemini with API key: {masked_key}")
-            genai.configure(api_key=gemini_api_key)
-            logger.info("Gemini API configured successfully")
+            AI_PROVIDER = 'gemini'
         else:
-            logger.error("No Gemini API key found!")
+            logger.error("No working AI providers found")
+elif gemini_api_key:
+    AI_PROVIDER = 'gemini'
+    try:
+        genai.configure(api_key=gemini_api_key)
+        logger.info("Gemini API configured successfully")
     except Exception as e:
         logger.error(f"Failed to initialize Gemini: {str(e)}")
+else:
+    logger.error("No AI provider keys found. Application may not function correctly.")
+    AI_PROVIDER = 'openai'  # Default even though it won't work
+
+logger.info(f"AI_PROVIDER set to: {AI_PROVIDER}")
 
 # Initialize session storage for users
 if 'users_state' not in app.config:
     app.config['users_state'] = {}
+
+# System prompt for AI assistants - consistent across providers
+SYSTEM_PROMPT = """Ты голосовой ассистент, навык в умной колонке Яндекса. 
+Пользователь может задать тебе односложный или более развернутый вопрос. 
+Отвечай не слишком длинно, но и не чрезмерно кратко. 
+API дает тебе лишь 3 секунды на ответ, это около параграфа. 
+Твой ответ может включать в себя до трех предложений."""
 
 # Function to clean Alisa greeting
 def clean_request(request_text):
@@ -65,13 +78,14 @@ def clean_request(request_text):
 
 # Function to interact with OpenAI
 def ask_openai(message, messages, max_retries=2):
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
+    if not openai_api_key:
         logger.error("OpenAI API key not found")
         return 'Не удалось получить ответ от сервиса (ошибка конфигурации).'
     
     # Create the proper message format
-    formatted_messages = []
+    formatted_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    
+    # Add conversation history
     for msg in messages[-10:]:  # Limit context window size
         formatted_messages.append({"role": "user", "content": msg})
     
@@ -81,48 +95,29 @@ def ask_openai(message, messages, max_retries=2):
     retries = 0
     while retries <= max_retries:
         try:
-            response = requests.post(
-                'https://api.openai.com/v1/chat/completions',
-                headers={
-                    'Authorization': f'Bearer {api_key}',
-                    'Content-Type': 'application/json'
-                },
-                json={
-                    'model': 'gpt-4o-mini',
-                    'messages': formatted_messages,
-                    'max_tokens': 1000,
-                    'temperature': 0.7
-                },
+            # Use the official OpenAI client
+            completion = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=formatted_messages,
+                max_tokens=1000,
+                temperature=0.7,
                 timeout=30.0
             )
             
-            # Check if the response was successful
-            response.raise_for_status()
-            
-            response_data = response.json()
             logger.info("OpenAI API response received")
             
-            if 'choices' not in response_data or len(response_data['choices']) == 0:
-                logger.error(f"Unexpected API response format: {response_data}")
-                return 'Не удалось получить ответ от сервиса.'
-                
-            return response_data['choices'][0]['message']['content'].strip()
-        except requests.exceptions.RequestException as e:
+            # Extract the content from the response
+            return completion.choices[0].message.content.strip()
+            
+        except Exception as e:
             retries += 1
-            logger.error(f"OpenAI API request error (attempt {retries}/{max_retries}): {str(e)}")
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"Response status: {e.response.status_code}")
-                logger.error(f"Response body: {e.response.text}")
+            logger.error(f"OpenAI API error (attempt {retries}/{max_retries}): {str(e)}")
             
             if retries > max_retries:
                 return 'Не удалось получить ответ от сервиса. Пожалуйста, попробуйте позже.'
-        except Exception as e:
-            logger.error(f"OpenAI API error: {str(e)}")
-            return 'Не удалось получить ответ от сервиса.'
 
 # Function to interact with Gemini
 def ask_gemini(message, messages, max_retries=2):
-    gemini_api_key = os.getenv('GEMINI_API_KEY')
     if not gemini_api_key:
         logger.error("Gemini API key not found")
         return 'Не удалось получить ответ от сервиса (ошибка конфигурации).'
@@ -130,38 +125,73 @@ def ask_gemini(message, messages, max_retries=2):
     retries = 0
     while retries <= max_retries:
         try:
-            # Combine previous messages and current message with clear distinction
-            history_text = ""
-            if messages:
-                history_text = "Previous conversation:\n" + "\n".join([f"User: {msg}" for msg in messages[-5:]])  # Limit context
-            full_prompt = f"{history_text}\n\nCurrent message: {message}" if history_text else message
+            # Initialize the client with API key
+            client = genai.Client(api_key=gemini_api_key)
             
-            logger.info(f"Sending request to Gemini API with prompt: {full_prompt[:100]}...")
+            # Format previous messages
+            previous_messages = ""
+            if messages and len(messages) > 1:  # More than just the current message
+                previous_messages = "\n".join([f"User: {msg}" for msg in messages[-5:-1]])
             
-            # Create the model and generate content
-            model = genai.GenerativeModel('gemini-2.0-flash')
-            response = model.generate_content(full_prompt)
+            # Create the content for the API request
+            contents = [
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=message)],
+                )
+            ]
+            
+            # If we have previous messages, add context
+            if previous_messages:
+                contents[0].parts.insert(
+                    0, 
+                    types.Part.from_text(text=f"Previous conversation:\n{previous_messages}")
+                )
+            
+            # Configure the generation parameters
+            generate_content_config = types.GenerateContentConfig(
+                temperature=0.7,
+                top_p=0.95,
+                top_k=40,
+                max_output_tokens=1000,
+                response_mime_type="text/plain",
+                system_instruction=[
+                    types.Part.from_text(text=SYSTEM_PROMPT)
+                ],
+            )
+            
+            logger.info(f"Sending request to Gemini API with message: {message[:100]}...")
+            
+            # Generate content (non-streaming for simplicity)
+            response = client.models.generate_content(
+                model="gemini-2.0-flash-lite",
+                contents=contents,
+                config=generate_content_config,
+            )
             
             logger.info("Gemini API response received")
             
-            # Extract the text from the response
+            # Extract the response text
             if response and hasattr(response, 'text'):
                 return response.text.strip()
             else:
                 logger.error(f"Unexpected Gemini response format: {response}")
                 return 'Не удалось получить ответ от сервиса.'
+                
         except Exception as e:
             retries += 1
             logger.error(f"Gemini API error (attempt {retries}/{max_retries}): {str(e)}")
             if retries > max_retries:
                 return 'Не удалось получить ответ от сервиса. Пожалуйста, попробуйте позже.'
-
+            
 # Health check endpoint
 @app.route('/health', methods=['GET'])
 def health_check():
     status = {
         'status': 'ok',
-        'ai_provider': AI_PROVIDER
+        'ai_provider': AI_PROVIDER,
+        'openai_available': bool(openai_api_key),
+        'gemini_available': bool(gemini_api_key)
     }
     return jsonify(status)
       
@@ -223,10 +253,16 @@ def handle_request():
             # Choose AI provider based on configuration
             logger.info(f"Using AI provider: {AI_PROVIDER}")
             
-            if AI_PROVIDER == 'gemini':
+            # Try preferred provider first, fall back to available provider if needed
+            if AI_PROVIDER == 'gemini' and gemini_api_key:
+                bot_reply = ask_gemini(user_message, user_state['messages'])
+            elif openai_api_key:
+                bot_reply = ask_openai(user_message, user_state['messages'])
+            elif gemini_api_key:
+                logger.warning("Falling back to Gemini as OpenAI is unavailable")
                 bot_reply = ask_gemini(user_message, user_state['messages'])
             else:
-                bot_reply = ask_openai(user_message, user_state['messages'])
+                bot_reply = 'Извините, сервис временно недоступен.'
                 
             response['response']['text'] = bot_reply
             response['response']['tts'] = bot_reply + '<speaker audio="alice-sounds-things-door-2.opus">'

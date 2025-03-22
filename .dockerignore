@@ -6,3 +6,11 @@ __pycache__
 *.pyd
 .Python
 flask_session/
+.devenv/
+.direnv/
+devenv.nix
+devenv.venv
+.github/
+.envrc
+.gitignore
+docker-compose.yml
